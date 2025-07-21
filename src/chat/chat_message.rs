@@ -79,6 +79,7 @@ pub struct MessageOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CacheControl {
 	Ephemeral,
+	EphemeralWithTtl(String), // TTL as string: "5m" or "1h"
 }
 
 impl From<CacheControl> for MessageOptions {

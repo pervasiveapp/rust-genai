@@ -2,9 +2,10 @@ use crate::adapter::adapters::support::get_api_key;
 use crate::adapter::anthropic::AnthropicStreamer;
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
-	Binary, BinarySource, ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamResponse,
-	ContentPart, MessageContent, PromptTokensDetails, ReasoningEffort, ToolCall, Usage,
+	Binary, BinarySource, CacheControl, ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ChatStream,
+	ChatStreamResponse, ContentPart, MessageContent, PromptTokensDetails, ReasoningEffort, ToolCall, Usage,
 };
+
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{EventSourceStream, WebResponse};
 use crate::{Headers, ModelIden};
@@ -104,12 +105,37 @@ impl Adapter for AnthropicAdapter {
 		let url = Self::get_service_url(&model, service_type, endpoint)?;
 
 		// -- headers
-		let headers = Headers::from(vec![
+		let mut headers = vec![
 			// headers
 			("x-api-key".to_string(), api_key),
 			("anthropic-beta".to_string(), "effort-2025-11-24".to_string()),
 			("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
-		]);
+		];
+
+		// Add beta headers for caching support
+		let has_cache_control = chat_req
+			.messages
+			.iter()
+			.any(|msg| msg.options.as_ref().map_or(false, |opts| opts.cache_control.is_some()));
+
+		if has_cache_control {
+			// Always add prompt-caching header if any cache control is used
+			headers.push(("anthropic-beta".to_string(), "prompt-caching-2024-07-31".to_string()));
+
+			// Add extended TTL header if TTL is specified
+			if chat_req.messages.iter().any(|msg| {
+				msg.options.as_ref().map_or(false, |opts| {
+					matches!(opts.cache_control.as_ref(), Some(CacheControl::EphemeralWithTtl(_)))
+				})
+			}) {
+				// Combine both beta features
+				headers.pop(); // Remove the previous header
+				headers.push((
+					"anthropic-beta".to_string(),
+					"prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11".to_string(),
+				));
+			}
+		}
 
 		// -- Parts
 		let AnthropicRequestParts {
@@ -238,7 +264,11 @@ impl Adapter for AnthropicAdapter {
 			payload.x_insert("top_p", top_p)?;
 		}
 
-		Ok(WebRequestData { url, headers, payload })
+		Ok(WebRequestData {
+			url,
+			headers: Headers::from(headers),
+			payload,
+		})
 	}
 
 	fn to_chat_response(
@@ -395,24 +425,24 @@ impl AnthropicAdapter {
 	/// - Will push the `ChatRequest.system` and system message to `AnthropicRequestParts.system`
 	fn into_anthropic_request_parts(chat_req: ChatRequest) -> Result<AnthropicRequestParts> {
 		let mut messages: Vec<Value> = Vec::new();
-		// (content, is_cache_control)
-		let mut systems: Vec<(String, bool)> = Vec::new();
+		// (content, cache_control)
+		let mut systems: Vec<(String, Option<CacheControl>)> = Vec::new();
 
 		// NOTE: For now, this means the first System cannot have a cache control
 		//       so that we do not change too much.
 		if let Some(system) = chat_req.system {
-			systems.push((system, false));
+			systems.push((system, None));
 		}
 
 		// -- Process the messages
 		for msg in chat_req.messages {
-			let is_cache_control = msg.options.map(|o| o.cache_control.is_some()).unwrap_or(false);
+			let cache_control = msg.options.and_then(|o| o.cache_control);
 
 			match msg.role {
 				// Collect only text for system; other content parts are ignored by Anthropic here.
 				ChatRole::System => {
 					if let Some(system_text) = msg.content.joined_texts() {
-						systems.push((system_text, is_cache_control));
+						systems.push((system_text, cache_control));
 					}
 				}
 
@@ -420,7 +450,7 @@ impl AnthropicAdapter {
 				ChatRole::User => {
 					if msg.content.is_text_only() {
 						let text = msg.content.joined_texts().unwrap_or_else(String::new);
-						let content = apply_cache_control_to_text(is_cache_control, text);
+						let content = apply_cache_control_to_text(cache_control.as_ref(), text);
 						messages.push(json!({"role": "user", "content": content}));
 					} else {
 						let mut values: Vec<Value> = Vec::new();
@@ -490,7 +520,7 @@ impl AnthropicAdapter {
 								ContentPart::ThoughtSignature(_) => {}
 							}
 						}
-						let values = apply_cache_control_to_parts(is_cache_control, values);
+						let values = apply_cache_control_to_parts(cache_control.as_ref(), values);
 						messages.push(json!({"role": "user", "content": values}));
 					}
 				}
@@ -524,7 +554,7 @@ impl AnthropicAdapter {
 						}
 					}
 
-					if !has_tool_use && has_text && !is_cache_control && values.len() == 1 {
+					if !has_tool_use && has_text && cache_control.is_none() && values.len() == 1 {
 						// Optimize to simple string when it's only one text part and no cache control.
 						let text = values
 							.first()
@@ -532,10 +562,10 @@ impl AnthropicAdapter {
 							.and_then(|v| v.as_str())
 							.unwrap_or_default()
 							.to_string();
-						let content = apply_cache_control_to_text(false, text);
+						let content = apply_cache_control_to_text(None, text);
 						messages.push(json!({"role": "assistant", "content": content}));
 					} else {
-						let values = apply_cache_control_to_parts(is_cache_control, values);
+						let values = apply_cache_control_to_parts(cache_control.as_ref(), values);
 						messages.push(json!({"role": "assistant", "content": values}));
 					}
 				}
@@ -553,7 +583,7 @@ impl AnthropicAdapter {
 						}
 					}
 					if !values.is_empty() {
-						let values = apply_cache_control_to_parts(is_cache_control, values);
+						let values = apply_cache_control_to_parts(cache_control.as_ref(), values);
 						messages.push(json!({"role": "user", "content": values}));
 					}
 				}
@@ -564,19 +594,26 @@ impl AnthropicAdapter {
 		// NOTE: Anthropic does not have a "role": "system", just a single optional system property
 		let system = if !systems.is_empty() {
 			let mut last_cache_idx = -1;
+			let mut last_cache_control: Option<CacheControl> = None;
 			// first determine the last cache control index
-			for (idx, (_, is_cache_control)) in systems.iter().enumerate() {
-				if *is_cache_control {
+			for (idx, (_, cache_control)) in systems.iter().enumerate() {
+				if cache_control.is_some() {
 					last_cache_idx = idx as i32;
+					last_cache_control = cache_control.clone();
 				}
 			}
 			// Now build the system multi part
-			let system: Value = if last_cache_idx > 0 {
+			let system: Value = if last_cache_idx >= 0 {
 				let mut parts: Vec<Value> = Vec::new();
 				for (idx, (content, _)) in systems.iter().enumerate() {
 					let idx = idx as i32;
 					if idx == last_cache_idx {
-						let part = json!({"type": "text", "text": content, "cache_control": {"type": "ephemeral"}});
+						let cache_control_json = match &last_cache_control {
+							Some(CacheControl::Ephemeral) => json!({"type": "ephemeral"}),
+							Some(CacheControl::EphemeralWithTtl(ttl)) => json!({"type": "ephemeral", "ttl": ttl}),
+							None => json!({"type": "ephemeral"}), // fallback, shouldn't happen
+						};
+						let part = json!({"type": "text", "text": content, "cache_control": cache_control_json});
 						parts.push(part);
 					} else {
 						let part = json!({"type": "text", "text": content});
@@ -626,9 +663,13 @@ impl AnthropicAdapter {
 }
 
 /// Apply the cache control logic to a text content
-fn apply_cache_control_to_text(is_cache_control: bool, content: String) -> Value {
-	if is_cache_control {
-		let value = json!({"type": "text", "text": content, "cache_control": {"type": "ephemeral"}});
+fn apply_cache_control_to_text(cache_control: Option<&CacheControl>, content: String) -> Value {
+	if let Some(cc) = cache_control {
+		let cache_control_json = match cc {
+			CacheControl::Ephemeral => json!({"type": "ephemeral"}),
+			CacheControl::EphemeralWithTtl(ttl) => json!({"type": "ephemeral", "ttl": ttl}),
+		};
+		let value = json!({"type": "text", "text": content, "cache_control": cache_control_json});
 		json!(vec![value])
 	}
 	// simple return
@@ -637,15 +678,21 @@ fn apply_cache_control_to_text(is_cache_control: bool, content: String) -> Value
 	}
 }
 
-/// Apply the cache control logic to a text content
-fn apply_cache_control_to_parts(is_cache_control: bool, parts: Vec<Value>) -> Vec<Value> {
+/// Apply the cache control logic to content parts
+fn apply_cache_control_to_parts(cache_control: Option<&CacheControl>, parts: Vec<Value>) -> Vec<Value> {
 	let mut parts = parts;
-	if is_cache_control && !parts.is_empty() {
-		let len = parts.len();
-		if let Some(last_value) = parts.get_mut(len - 1) {
-			// NOTE: For now, if it fails, then, no cache
-			let _ = last_value.x_insert("cache_control", json!( {"type": "ephemeral"}));
-			// TODO: Should warn
+	if let Some(cc) = cache_control {
+		if !parts.is_empty() {
+			let cache_control_json = match cc {
+				CacheControl::Ephemeral => json!({"type": "ephemeral"}),
+				CacheControl::EphemeralWithTtl(ttl) => json!({"type": "ephemeral", "ttl": ttl}),
+			};
+			let len = parts.len();
+			if let Some(last_value) = parts.get_mut(len - 1) {
+				// NOTE: For now, if it fails, then, no cache
+				let _ = last_value.x_insert("cache_control", cache_control_json);
+				// TODO: Should warn
+			}
 		}
 	}
 	parts

@@ -99,6 +99,7 @@ pub struct MessageOptions {
 pub enum CacheControl {
 	/// Hint to avoid persisting this message in provider caches.
 	Ephemeral,
+	EphemeralWithTtl(String), // TTL as string: "5m" or "1h"
 }
 
 impl From<CacheControl> for MessageOptions {

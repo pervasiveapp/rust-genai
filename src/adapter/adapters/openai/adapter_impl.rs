@@ -3,7 +3,7 @@ use crate::adapter::openai::OpenAIStreamer;
 use crate::adapter::openai::ToWebRequestCustom;
 use crate::adapter::{Adapter, AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
-	BinarySource, ChatOptionsSet, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatStream,
+	BinarySource, CacheControl, ChatOptionsSet, ChatRequest, ChatResponse, ChatResponseFormat, ChatRole, ChatStream,
 	ChatStreamResponse, ContentPart, MessageContent, ReasoningEffort, ToolCall, Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
@@ -29,6 +29,36 @@ const MODELS: &[&str] = &[
 	"gpt-audio-mini",
 	"gpt-audio",
 ];
+
+// Helper functions for OpenRouter cache control support
+fn cache_control_to_json(cc: &CacheControl) -> Value {
+	match cc {
+		CacheControl::Ephemeral => json!({"type": "ephemeral"}),
+		CacheControl::EphemeralWithTtl(ttl) => json!({"type": "ephemeral", "ttl": ttl}),
+	}
+}
+
+fn apply_cache_control_to_text(cache_control: Option<&CacheControl>, content: String) -> Value {
+	if let Some(cc) = cache_control {
+		// Wrap text in a part with cache_control for OpenRouter
+		json!([{"type": "text", "text": content, "cache_control": cache_control_to_json(cc)}])
+	} else {
+		json!(content)
+	}
+}
+
+fn apply_cache_control_to_parts(cache_control: Option<&CacheControl>, mut parts: Vec<Value>) -> Vec<Value> {
+	if let Some(cc) = cache_control {
+		// Apply cache_control to the last text part (search from the end)
+		for part in parts.iter_mut().rev() {
+			if part.get("type").and_then(|v| v.as_str()) == Some("text") {
+				part["cache_control"] = cache_control_to_json(cc);
+				break; // Only apply to the last text part found
+			}
+		}
+	}
+	parts
+}
 
 impl OpenAIAdapter {
 	pub const API_KEY_DEFAULT_ENV_NAME: &str = "OPENAI_API_KEY";
@@ -240,6 +270,33 @@ impl OpenAIAdapter {
 		// -- Build the basic payload
 
 		let OpenAIRequestParts { messages, tools } = Self::into_openai_request_parts(&model, chat_req)?;
+
+		// Debug: Log the messages to see if cache_control is present
+		// Commented out to avoid duplicate logging - we're now logging in librp's context builder
+		/*
+		if url.contains("openrouter") {
+			log::info!("OpenRouter Request - Model: {}, URL: {}", model_name, url);
+			for (i, msg) in messages.iter().enumerate() {
+				if let Some(content) = msg.get("content") {
+					let has_cache = if content.is_array() {
+						content.as_array().unwrap().iter().any(|part| part.get("cache_control").is_some())
+					} else {
+						false
+					};
+					let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+					log::info!("  Message {}: role={}, has_cache_control={}", i, role, has_cache);
+					if has_cache && content.is_array() {
+						for part in content.as_array().unwrap() {
+							if let Some(cc) = part.get("cache_control") {
+								log::info!("    cache_control: {}", serde_json::to_string(cc).unwrap_or_default());
+							}
+						}
+					}
+				}
+			}
+		}
+		*/
+
 		let mut payload = json!({
 			"model": model_name,
 			"messages": messages,
@@ -334,6 +391,29 @@ impl OpenAIAdapter {
 			payload.x_insert("service_tier", keyword)?;
 		}
 
+		// Debug: Log summary of cache control in final payload for OpenRouter requests
+		if url.contains("openrouter") {
+			if let Some(messages) = payload.get("messages").and_then(|m| m.as_array()) {
+				let mut cache_count = 0;
+				for msg in messages {
+					if let Some(content) = msg.get("content") {
+						if content.is_array() {
+							for part in content.as_array().unwrap() {
+								if part.get("cache_control").is_some() {
+									cache_count += 1;
+								}
+							}
+						}
+					}
+				}
+				log::info!(
+					"OpenRouter Final Payload: {} messages total, {} have cache_control",
+					messages.len(),
+					cache_count
+				);
+			}
+		}
+
 		Ok(WebRequestData { url, headers, payload })
 	}
 
@@ -367,8 +447,11 @@ impl OpenAIAdapter {
 	/// Takes the genai ChatMessages and builds the OpenAIChatRequestParts
 	/// - `genai::ChatRequest.system`, if present, is added as the first message with role 'system'.
 	/// - All messages get added with the corresponding roles (tools are not supported for now)
-	fn into_openai_request_parts(_model_iden: &ModelIden, chat_req: ChatRequest) -> Result<OpenAIRequestParts> {
+	fn into_openai_request_parts(model_iden: &ModelIden, chat_req: ChatRequest) -> Result<OpenAIRequestParts> {
 		let mut messages: Vec<Value> = Vec::new();
+
+		// Detect OpenRouter-style model names (provider/model format)
+		let is_openrouter_model = model_iden.model_name.contains('/');
 
 		// -- Process the system
 		if let Some(system_msg) = chat_req.system {
@@ -382,7 +465,13 @@ impl OpenAIAdapter {
 				// For now, system and tool messages go to the system
 				ChatRole::System => {
 					if let Some(content) = msg.content.into_joined_texts() {
-						messages.push(json!({"role": "system", "content": content}))
+						let content_value = if is_openrouter_model {
+							let cc = msg.options.as_ref().and_then(|o| o.cache_control.as_ref());
+							apply_cache_control_to_text(cc, content)
+						} else {
+							json!(content)
+						};
+						messages.push(json!({"role": "system", "content": content_value}))
 					}
 					// TODO: Probably need to warn if it is a ToolCalls type of content
 				}
@@ -392,8 +481,14 @@ impl OpenAIAdapter {
 					// -- If we have only text, then, we jjust returned the joined_texts
 					if msg.content.is_text_only() {
 						// NOTE: for now, if no content, just return empty string (respect current logic)
-						let content = json!(msg.content.joined_texts().unwrap_or_else(String::new));
-						messages.push(json! ({"role": "user", "content": content}));
+						let text = msg.content.joined_texts().unwrap_or_else(String::new);
+						let content_value = if is_openrouter_model {
+							let cc = msg.options.as_ref().and_then(|o| o.cache_control.as_ref());
+							apply_cache_control_to_text(cc, text)
+						} else {
+							json!(text)
+						};
+						messages.push(json! ({"role": "user", "content": content_value}));
 					} else {
 						let mut values: Vec<Value> = Vec::new();
 						for part in msg.content {
@@ -455,7 +550,14 @@ impl OpenAIAdapter {
 								ContentPart::ThoughtSignature(_) => (),
 							}
 						}
-						messages.push(json! ({"role": "user", "content": values}));
+						// Apply cache control to multipart content if OpenRouter model
+						let content_values = if is_openrouter_model {
+							let cc = msg.options.as_ref().and_then(|o| o.cache_control.as_ref());
+							apply_cache_control_to_parts(cc, values)
+						} else {
+							values
+						};
+						messages.push(json! ({"role": "user", "content": content_values}));
 					}
 				}
 
@@ -485,8 +587,20 @@ impl OpenAIAdapter {
 							ContentPart::ThoughtSignature(_) => {}
 						}
 					}
-					let content = texts.join("\n\n");
-					let mut message = json!({"role": "assistant", "content": content});
+					let content_text = texts.join("\n\n");
+
+					// Apply cache control for OpenRouter models
+					let content_value = if is_openrouter_model && !tool_calls.is_empty() {
+						// If we have tool calls, can't wrap in array
+						json!(content_text)
+					} else if is_openrouter_model {
+						let cc = msg.options.as_ref().and_then(|o| o.cache_control.as_ref());
+						apply_cache_control_to_text(cc, content_text)
+					} else {
+						json!(content_text)
+					};
+
+					let mut message = json!({"role": "assistant", "content": content_value});
 					if !tool_calls.is_empty() {
 						message.x_insert("tool_calls", tool_calls)?;
 					}
@@ -633,3 +747,151 @@ fn parse_tool_call(raw_tool_call: Value) -> Result<ToolCall> {
 }
 
 // endregion: --- Support
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::chat::{ChatMessage, ContentPart, MessageOptions};
+
+	#[test]
+	fn test_cache_control_for_openrouter_models() {
+		// Test with OpenRouter model (contains "/")
+		let model_iden = ModelIden::new(AdapterKind::OpenAI, "anthropic/claude-4.1-opus");
+
+		// Create a chat request with cache control on user message
+		let mut user_msg = ChatMessage::user("Test message");
+		user_msg.options = Some(MessageOptions {
+			cache_control: Some(CacheControl::Ephemeral),
+		});
+
+		let chat_req = ChatRequest {
+			system: Some("System prompt".to_string()),
+			messages: vec![user_msg],
+			tools: None,
+		};
+
+		// Convert to OpenAI request parts
+		let result = OpenAIAdapter::into_openai_request_parts(&model_iden, chat_req).unwrap();
+
+		// Check that the user message has cache_control
+		assert_eq!(result.messages.len(), 2); // system + user
+
+		// Check user message has cache_control in content
+		let user_msg_content = &result.messages[1]["content"];
+		assert!(
+			user_msg_content.is_array(),
+			"Content should be wrapped in array for cache control"
+		);
+
+		let content_parts = user_msg_content.as_array().unwrap();
+		assert_eq!(content_parts.len(), 1);
+
+		let first_part = &content_parts[0];
+		assert_eq!(first_part["type"], "text");
+		assert_eq!(first_part["text"], "Test message");
+		assert_eq!(first_part["cache_control"]["type"], "ephemeral");
+	}
+
+	#[test]
+	fn test_no_cache_control_for_regular_openai_models() {
+		// Test with regular OpenAI model (no "/")
+		let model_iden = ModelIden::new(AdapterKind::OpenAI, "gpt-5");
+
+		// Create a chat request with cache control on user message
+		let mut user_msg = ChatMessage::user("Test message");
+		user_msg.options = Some(MessageOptions {
+			cache_control: Some(CacheControl::Ephemeral),
+		});
+
+		let chat_req = ChatRequest {
+			system: Some("System prompt".to_string()),
+			messages: vec![user_msg],
+			tools: None,
+		};
+
+		// Convert to OpenAI request parts
+		let result = OpenAIAdapter::into_openai_request_parts(&model_iden, chat_req).unwrap();
+
+		// Check that the user message does NOT have cache_control
+		assert_eq!(result.messages.len(), 2); // system + user
+
+		// Check user message content is plain string
+		let user_msg_content = &result.messages[1]["content"];
+		assert!(
+			user_msg_content.is_string(),
+			"Content should be plain string without cache control"
+		);
+		assert_eq!(user_msg_content.as_str().unwrap(), "Test message");
+	}
+
+	#[test]
+	fn test_cache_control_with_ttl() {
+		// Test with TTL cache control
+		let model_iden = ModelIden::new(AdapterKind::OpenAI, "anthropic/claude-4.1-opus");
+
+		let mut user_msg = ChatMessage::user("Test message");
+		user_msg.options = Some(MessageOptions {
+			cache_control: Some(CacheControl::EphemeralWithTtl("3600".to_string())),
+		});
+
+		let chat_req = ChatRequest {
+			system: None,
+			messages: vec![user_msg],
+			tools: None,
+		};
+
+		let result = OpenAIAdapter::into_openai_request_parts(&model_iden, chat_req).unwrap();
+
+		let user_msg_content = &result.messages[0]["content"];
+		let content_parts = user_msg_content.as_array().unwrap();
+		let first_part = &content_parts[0];
+
+		assert_eq!(first_part["cache_control"]["type"], "ephemeral");
+		assert_eq!(first_part["cache_control"]["ttl"], "3600");
+	}
+
+	#[test]
+	fn test_cache_control_on_multipart_message() {
+		// Test with multipart message (text + binary)
+		let model_iden = ModelIden::new(AdapterKind::OpenAI, "anthropic/claude-4.1-opus");
+
+		let user_msg = ChatMessage {
+			role: ChatRole::User,
+			content: MessageContent::from_parts(vec![
+				ContentPart::Text("Look at this image:".to_string()),
+				ContentPart::Binary(Binary {
+					content_type: "image/png".to_string(),
+					source: BinarySource::Base64("base64data".to_string().into()),
+					name: None,
+				}),
+			]),
+			options: Some(MessageOptions {
+				cache_control: Some(CacheControl::Ephemeral),
+			}),
+		};
+
+		let chat_req = ChatRequest {
+			system: None,
+			messages: vec![user_msg],
+			tools: None,
+		};
+
+		let result = OpenAIAdapter::into_openai_request_parts(&model_iden, chat_req).unwrap();
+
+		let user_msg_content = &result.messages[0]["content"];
+		let content_parts = user_msg_content.as_array().unwrap();
+
+		// Should have 2 parts: text and image
+		assert_eq!(content_parts.len(), 2);
+
+		// Cache control should be on the LAST text part (first part in this case)
+		let text_part = &content_parts[0];
+		assert_eq!(text_part["type"], "text");
+		assert_eq!(text_part["cache_control"]["type"], "ephemeral");
+
+		// Image part should not have cache_control
+		let image_part = &content_parts[1];
+		assert_eq!(image_part["type"], "image_url");
+		assert!(image_part.get("cache_control").is_none());
+	}
+}

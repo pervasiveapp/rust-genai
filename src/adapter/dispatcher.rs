@@ -1,6 +1,7 @@
 use super::groq::GroqAdapter;
 use crate::adapter::adapters::mimo::MimoAdapter;
 use crate::adapter::adapters::together::TogetherAdapter;
+use crate::adapter::adapters::vertex_anthropic::VertexAnthropicAdapter;
 use crate::adapter::adapters::zai::ZaiAdapter;
 use crate::adapter::anthropic::AnthropicAdapter;
 use crate::adapter::bigmodel::BigModelAdapter;
@@ -47,6 +48,7 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::default_endpoint(),
 			AdapterKind::Cohere => CohereAdapter::default_endpoint(),
 			AdapterKind::Ollama => OllamaAdapter::default_endpoint(),
+			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::default_endpoint(),
 		}
 	}
 
@@ -67,6 +69,7 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::default_auth(),
 			AdapterKind::Cohere => CohereAdapter::default_auth(),
 			AdapterKind::Ollama => OllamaAdapter::default_auth(),
+			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::default_auth(),
 		}
 	}
 
@@ -87,6 +90,7 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::all_model_names(kind).await,
 			AdapterKind::Cohere => CohereAdapter::all_model_names(kind).await,
 			AdapterKind::Ollama => OllamaAdapter::all_model_names(kind).await,
+			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::all_model_names(kind).await,
 		}
 	}
 
@@ -107,6 +111,7 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::get_service_url(model, service_type, endpoint),
 			AdapterKind::Cohere => CohereAdapter::get_service_url(model, service_type, endpoint),
 			AdapterKind::Ollama => OllamaAdapter::get_service_url(model, service_type, endpoint),
+			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::get_service_url(model, service_type, endpoint),
 		}
 	}
 
@@ -139,6 +144,9 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::to_web_request_data(target, service_type, chat_req, options_set),
 			AdapterKind::Cohere => CohereAdapter::to_web_request_data(target, service_type, chat_req, options_set),
 			AdapterKind::Ollama => OllamaAdapter::to_web_request_data(target, service_type, chat_req, options_set),
+			AdapterKind::VertexAnthropic => {
+				VertexAnthropicAdapter::to_web_request_data(target, service_type, chat_req, options_set)
+			}
 		}
 	}
 
@@ -163,6 +171,9 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::to_chat_response(model_iden, web_response, options_set),
 			AdapterKind::Cohere => CohereAdapter::to_chat_response(model_iden, web_response, options_set),
 			AdapterKind::Ollama => OllamaAdapter::to_chat_response(model_iden, web_response, options_set),
+			AdapterKind::VertexAnthropic => {
+				VertexAnthropicAdapter::to_chat_response(model_iden, web_response, options_set)
+			}
 		}
 	}
 
@@ -190,6 +201,9 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::to_chat_stream(model_iden, reqwest_builder, options_set),
 			AdapterKind::Cohere => CohereAdapter::to_chat_stream(model_iden, reqwest_builder, options_set),
 			AdapterKind::Ollama => OllamaAdapter::to_chat_stream(model_iden, reqwest_builder, options_set),
+			AdapterKind::VertexAnthropic => {
+				VertexAnthropicAdapter::to_chat_stream(model_iden, reqwest_builder, options_set)
+			}
 		}
 	}
 
@@ -218,6 +232,9 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::to_embed_request_data(target, embed_req, options_set),
 			AdapterKind::Cohere => CohereAdapter::to_embed_request_data(target, embed_req, options_set),
 			AdapterKind::Ollama => OllamaAdapter::to_embed_request_data(target, embed_req, options_set),
+			AdapterKind::VertexAnthropic => {
+				VertexAnthropicAdapter::to_embed_request_data(target, embed_req, options_set)
+			}
 		}
 	}
 
@@ -245,6 +262,9 @@ impl AdapterDispatcher {
 			AdapterKind::BigModel => BigModelAdapter::to_embed_response(model_iden, web_response, options_set),
 			AdapterKind::Cohere => CohereAdapter::to_embed_response(model_iden, web_response, options_set),
 			AdapterKind::Ollama => OllamaAdapter::to_embed_response(model_iden, web_response, options_set),
+			AdapterKind::VertexAnthropic => {
+				VertexAnthropicAdapter::to_embed_response(model_iden, web_response, options_set)
+			}
 		}
 	}
 }

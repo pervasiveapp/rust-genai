@@ -1,4 +1,5 @@
 use crate::adapter::adapters::together::TogetherAdapter;
+use crate::adapter::adapters::vertex_anthropic::VertexAnthropicAdapter;
 use crate::adapter::adapters::zai::ZaiAdapter;
 use crate::adapter::anthropic::AnthropicAdapter;
 use crate::adapter::bigmodel::BigModelAdapter;
@@ -51,6 +52,8 @@ pub enum AdapterKind {
 	Cohere,
 	/// OpenAI shared behavior + some custom. (currently, localhost only, can be customize with ServerTargetResolver).
 	Ollama,
+	/// Anthropic via Google Vertex AI (Publisher Model)
+	VertexAnthropic,
 }
 
 /// Serialization/Parse implementations
@@ -73,6 +76,7 @@ impl AdapterKind {
 			AdapterKind::BigModel => "BigModel",
 			AdapterKind::Cohere => "Cohere",
 			AdapterKind::Ollama => "Ollama",
+			AdapterKind::VertexAnthropic => "VertexAnthropic",
 		}
 	}
 
@@ -94,6 +98,7 @@ impl AdapterKind {
 			AdapterKind::BigModel => "BigModel",
 			AdapterKind::Cohere => "cohere",
 			AdapterKind::Ollama => "ollama",
+			AdapterKind::VertexAnthropic => "vertex-anthropic",
 		}
 	}
 
@@ -114,6 +119,7 @@ impl AdapterKind {
 			"bigmodel" => Some(AdapterKind::BigModel),
 			"cohere" => Some(AdapterKind::Cohere),
 			"ollama" => Some(AdapterKind::Ollama),
+			"vertex-anthropic" => Some(AdapterKind::VertexAnthropic),
 			_ => None,
 		}
 	}
@@ -139,6 +145,7 @@ impl AdapterKind {
 			AdapterKind::BigModel => Some(BigModelAdapter::API_KEY_DEFAULT_ENV_NAME),
 			AdapterKind::Cohere => Some(CohereAdapter::API_KEY_DEFAULT_ENV_NAME),
 			AdapterKind::Ollama => None,
+			AdapterKind::VertexAnthropic => Some(VertexAnthropicAdapter::API_KEY_DEFAULT_ENV_NAME),
 		}
 	}
 }

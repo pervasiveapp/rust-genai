@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use futures::stream::TryStreamExt;
 use futures::{Future, Stream};
+use log::debug;
 use reqwest::{RequestBuilder, Response};
 use std::collections::VecDeque;
 use std::error::Error;
@@ -74,6 +75,15 @@ impl Stream for WebStream {
 			if let Some(ref mut fut) = this.response_future {
 				match Pin::new(fut).poll(cx) {
 					Poll::Ready(Ok(response)) => {
+						// Minimal connection diagnostics
+						let status = response.status();
+						let ct = response
+							.headers()
+							.get("content-type")
+							.and_then(|v| v.to_str().ok())
+							.unwrap_or("");
+						debug!("WebStream connected: status={} content-type={}", status.as_u16(), ct);
+
 						let bytes_stream = response.bytes_stream().map_err(|e| Box::new(e) as Box<dyn Error>);
 						this.bytes_stream = Some(Box::pin(bytes_stream));
 						this.response_future = None;

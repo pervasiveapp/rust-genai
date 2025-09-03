@@ -1,5 +1,6 @@
 use crate::adapter::{AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{ChatOptions, ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
+use crate::client::Headers;
 use crate::embed::{EmbedOptions, EmbedOptionsSet, EmbedRequest, EmbedResponse};
 use crate::resolver::AuthData;
 use crate::{Client, Error, ModelIden, Result, ServiceTarget};
@@ -47,7 +48,7 @@ impl Client {
 		self.config().resolve_service_target(model).await
 	}
 
-	/// Sends a chat request and returns the full response.
+	/// Executes a chat.
 	pub async fn exec_chat(
 		&self,
 		model: &str,
@@ -61,6 +62,7 @@ impl Client {
 
 		let model = self.default_model(model)?;
 		let target = self.config().resolve_service_target(model).await?;
+		let endpoint_base = target.endpoint.base_url().to_string();
 		let model = target.model.clone();
 		let auth_data = target.auth.clone();
 
@@ -83,21 +85,36 @@ impl Client {
 			headers = override_headers;
 		};
 
-		let web_res =
-			self.web_client()
-				.do_post(&url, &headers, payload)
-				.await
-				.map_err(|webc_error| Error::WebModelCall {
-					model_iden: model.clone(),
-					webc_error,
-				})?;
+		let web_res = self.web_client().do_post(&url, &headers, payload.clone()).await.map_err(|webc_error| {
+            // On failure, emit a concise diagnostic with sanitized request context and response body snippet
+            let sanitized = sanitize_headers(&headers);
+            let payload_snip = truncate_json(&payload, 1200);
+            let (status_str, resp_body_snip) = match &webc_error {
+                crate::webc::Error::ResponseFailedStatus { status, body, .. } => {
+                    (status.as_str().to_string(), truncate_str(body, 2000))
+                }
+                _ => ("".to_string(), String::new()),
+            };
+            if status_str.is_empty() {
+                log::warn!(
+                    "GENAI HTTP error - adapter={:?} endpoint_base={} url={} headers={:?} payload_snip={}",
+                    model.adapter_kind, endpoint_base, url, sanitized, payload_snip
+                );
+            } else {
+                log::warn!(
+                    "GENAI HTTP error - adapter={:?} endpoint_base={} url={} status={} headers={:?} payload_snip={} resp_body_snip={}",
+                    model.adapter_kind, endpoint_base, url, status_str, sanitized, payload_snip, resp_body_snip
+                );
+            }
+            Error::WebModelCall { model_iden: model.clone(), webc_error }
+        })?;
 
 		let chat_res = AdapterDispatcher::to_chat_response(model, web_res, options_set)?;
 
 		Ok(chat_res)
 	}
 
-	/// Streams a chat response.
+	/// Executes a chat stream response.
 	pub async fn exec_chat_stream(
 		&self,
 		model: &str,
@@ -110,6 +127,7 @@ impl Client {
 
 		let model = self.default_model(model)?;
 		let target = self.config().resolve_service_target(model).await?;
+		let endpoint_base = target.endpoint.base_url().to_string();
 		let model = target.model.clone();
 		let auth_data = target.auth.clone();
 
@@ -134,6 +152,17 @@ impl Client {
 			url = override_url;
 			headers = override_headers;
 		};
+
+		// Log the resolved request context at debug level (only once for stream start)
+		let payload_snip = truncate_json(&payload, 1200);
+		log::debug!(
+			"GENAI Stream start - adapter={:?} endpoint_base={} url={} headers={:?} payload_snip={}",
+			model.adapter_kind,
+			endpoint_base,
+			url,
+			sanitize_headers(&headers),
+			payload_snip
+		);
 
 		let reqwest_builder = self
 			.web_client()
@@ -202,3 +231,44 @@ impl Client {
 		Ok(res)
 	}
 }
+
+// region: --- Logging helpers
+fn sanitize_headers(headers: &Headers) -> Vec<(String, String)> {
+	headers
+		.iter()
+		.map(|(k, v)| {
+			let kl = k.to_ascii_lowercase();
+			if kl == "authorization" {
+				let masked = if let Some(rest) = v.strip_prefix("Bearer ") {
+					format!("Bearer ***len={}***", rest.len())
+				} else {
+					"***".to_string()
+				};
+				(k.clone(), masked)
+			} else if kl.contains("api-key") || kl == "x-goog-api-key" || kl == "x-api-key" {
+				(k.clone(), "***".to_string())
+			} else {
+				(k.clone(), v.clone())
+			}
+		})
+		.collect()
+}
+
+fn truncate_json(val: &serde_json::Value, max: usize) -> String {
+	let mut s = serde_json::to_string(val).unwrap_or_else(|_| "<serde_json_error>".to_string());
+	if s.len() > max {
+		s.truncate(max);
+		s.push_str("…");
+	}
+	s
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+	if s.len() <= max {
+		return s.to_string();
+	}
+	let mut out = s[..max].to_string();
+	out.push('…');
+	out
+}
+// endregion

@@ -9,6 +9,8 @@ mod auth_data;
 mod auth_resolver;
 mod endpoint;
 mod error;
+#[cfg(feature = "gcp-auth")]
+mod google_gcp;
 mod model_mapper;
 mod service_target_resolver;
 
@@ -16,6 +18,8 @@ pub use auth_data::*;
 pub use auth_resolver::*;
 pub use endpoint::*;
 pub use error::{Error, Result};
+#[cfg(feature = "gcp-auth")]
+pub use google_gcp::*;
 pub use model_mapper::*;
 pub use service_target_resolver::*;
 

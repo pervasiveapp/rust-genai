@@ -255,20 +255,25 @@ fn sanitize_headers(headers: &Headers) -> Vec<(String, String)> {
 }
 
 fn truncate_json(val: &serde_json::Value, max: usize) -> String {
-	let mut s = serde_json::to_string(val).unwrap_or_else(|_| "<serde_json_error>".to_string());
-	if s.len() > max {
-		s.truncate(max);
-		s.push_str("…");
-	}
-	s
+	let s = serde_json::to_string(val).unwrap_or_else(|_| "<serde_json_error>".to_string());
+	truncate_with_ellipsis(s, max)
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
+	truncate_with_ellipsis(s.to_owned(), max)
+}
+
+fn truncate_with_ellipsis(mut s: String, max: usize) -> String {
 	if s.len() <= max {
-		return s.to_string();
+		return s;
 	}
-	let mut out = s[..max].to_string();
-	out.push('…');
-	out
+	let mut boundary = max;
+	while boundary > 0 && !s.is_char_boundary(boundary) {
+		boundary -= 1;
+	}
+
+	s.truncate(boundary);
+	s.push('…');
+	s
 }
 // endregion

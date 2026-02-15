@@ -44,6 +44,26 @@ impl ContentPart {
 
 				parts.push(tool_call.into());
 			}
+			ItemType::BuiltinToolCall(tool_type) => {
+				// Example: {"type":"web_search_call","id":"ws_...","status":"completed","action":{...}}
+				let call_id = item_value
+					.x_take::<String>("id")
+					.or_else(|_| item_value.x_take::<String>("call_id"))
+					.or_else(|_| item_value.x_take::<String>("item_id"))?;
+
+				// Remove type so arguments only contains tool-specific fields.
+				let _ = item_value.x_remove::<String>("type");
+
+				let fn_name = tool_type.strip_suffix("_call").unwrap_or(&tool_type).to_string();
+
+				let tool_call = ToolCall {
+					call_id,
+					fn_name,
+					fn_arguments: item_value,
+					thought_signatures: None,
+				};
+				parts.push(tool_call.into());
+			}
 		}
 
 		Ok(parts)
@@ -56,6 +76,7 @@ impl ContentPart {
 enum ItemType {
 	Message,
 	FunctionCall,
+	BuiltinToolCall(String),
 }
 
 impl ItemType {
@@ -64,9 +85,38 @@ impl ItemType {
 		match typ {
 			"message" => Some(ItemType::Message),
 			"function_call" => Some(ItemType::FunctionCall),
+			other if other.ends_with("_call") => Some(ItemType::BuiltinToolCall(other.to_string())),
 			_ => None,
 		}
 	}
 }
 
 // endregion: --- Support Type
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use serde_json::json;
+
+	#[test]
+	fn parses_web_search_call_as_tool_call() {
+		let item = json!({
+			"type": "web_search_call",
+			"id": "ws_123",
+			"status": "completed",
+			"action": {"type": "search", "queries": ["fennel seeds nutrition"]}
+		});
+
+		let parts = ContentPart::from_resp_output_item(item).unwrap();
+		assert_eq!(parts.len(), 1);
+
+		let Some(tool_call) = parts[0].as_tool_call() else {
+			panic!("expected tool call");
+		};
+
+		assert_eq!(tool_call.call_id, "ws_123");
+		assert_eq!(tool_call.fn_name, "web_search");
+		assert_eq!(tool_call.fn_arguments.x_get_str("status").unwrap(), "completed");
+		assert_eq!(tool_call.fn_arguments.x_get_str("/action/type").unwrap(), "search");
+	}
+}

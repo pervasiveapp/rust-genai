@@ -751,7 +751,7 @@ fn parse_tool_call(raw_tool_call: Value) -> Result<ToolCall> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::chat::{ChatMessage, ContentPart, MessageOptions};
+	use crate::chat::{Binary, ChatMessage, ContentPart, MessageOptions};
 
 	#[test]
 	fn test_cache_control_for_openrouter_models() {

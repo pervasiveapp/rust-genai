@@ -1,5 +1,5 @@
 use crate::adapter::adapters::support::get_api_key;
-use crate::adapter::openai::OpenAIStreamer;
+use crate::adapter::openai_resp::OpenAIRespStreamer;
 use crate::adapter::openai_resp::resp_types::RespResponse;
 use crate::adapter::{Adapter, AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
@@ -19,7 +19,11 @@ pub struct OpenAIRespAdapter;
 // Latest models
 const MODELS: &[&str] = &[
 	//
+	"gpt-5.2",
+	"gpt-5.2-pro",
 	"gpt-5-pro",
+	"gpt-5-mini",
+	"gpt-5-nano",
 	"gpt-5-codex",
 	"gpt-5.1-codex",
 	"gpt-5.1-codex-mini",
@@ -75,14 +79,7 @@ impl Adapter for OpenAIRespAdapter {
 		// -- headers
 		let headers = Headers::from(("Authorization".to_string(), format!("Bearer {api_key}")));
 
-		// -- for new v1/responses/ for now do not support stream
 		let stream = matches!(service_type, ServiceType::ChatStream);
-		if stream {
-			return Err(Error::AdapterNotSupported {
-				adapter_kind,
-				feature: "stream".into(),
-			});
-		}
 
 		// -- compute reasoning_effort and eventual trimmed model_name
 		// For now, just for openai AdapterKind
@@ -109,7 +106,8 @@ impl Adapter for OpenAIRespAdapter {
 		let mut payload = json!({
 			"store": false,
 			"model": model_name,
-			"input": messages
+			"input": messages,
+			"stream": stream,
 		});
 
 		// -- Set reasoning effort
@@ -174,7 +172,7 @@ impl Adapter for OpenAIRespAdapter {
 		}
 
 		// -- Add supported ChatOptions
-		if stream & chat_options.capture_usage().unwrap_or(false) {
+		if stream && chat_options.capture_usage().unwrap_or(false) {
 			payload.x_insert("stream_options", json!({"include_usage": true}))?;
 		}
 
@@ -242,8 +240,8 @@ impl Adapter for OpenAIRespAdapter {
 		options_sets: ChatOptionsSet<'_, '_>,
 	) -> Result<ChatStreamResponse> {
 		let event_source = EventSourceStream::new(reqwest_builder);
-		let openai_stream = OpenAIStreamer::new(event_source, model_iden.clone(), options_sets);
-		let chat_stream = ChatStream::from_inter_stream(openai_stream);
+		let resp_stream = OpenAIRespStreamer::new(event_source, model_iden.clone(), options_sets);
+		let chat_stream = ChatStream::from_inter_stream(resp_stream);
 
 		Ok(ChatStreamResponse {
 			model_iden,
@@ -271,6 +269,51 @@ impl Adapter for OpenAIRespAdapter {
 			adapter_kind: crate::adapter::AdapterKind::OpenAIResp,
 			feature: "embeddings".to_string(),
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::chat::{ChatMessage, ChatOptions, ChatRequest, Tool};
+	use crate::resolver::AuthData;
+
+	#[test]
+	fn built_in_web_search_tool_serializes_as_builtin() {
+		let model = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5.2");
+		let endpoint = OpenAIRespAdapter::default_endpoint();
+		let target = ServiceTarget {
+			model,
+			auth: AuthData::from_single("dummy"),
+			endpoint,
+		};
+
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("hi")]).with_tools([Tool::new("web_search")]);
+		let options_set = ChatOptionsSet::default();
+
+		let req = OpenAIRespAdapter::to_web_request_data(target, ServiceType::Chat, chat_req, options_set).unwrap();
+		let tools = req.payload.x_get::<Vec<Value>>("tools").unwrap();
+		assert_eq!(tools[0].x_get_str("type").unwrap(), "web_search");
+		assert!(tools[0].get("name").is_none());
+	}
+
+	#[test]
+	fn responses_stream_request_sets_stream_true() {
+		let model = ModelIden::new(AdapterKind::OpenAIResp, "gpt-5.2");
+		let endpoint = OpenAIRespAdapter::default_endpoint();
+		let target = ServiceTarget {
+			model,
+			auth: AuthData::from_single("dummy"),
+			endpoint,
+		};
+
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("hi")]);
+		let chat_options = ChatOptions::default().with_capture_usage(true);
+		let options_set = ChatOptionsSet::default().with_chat_options(Some(&chat_options));
+
+		let req =
+			OpenAIRespAdapter::to_web_request_data(target, ServiceType::ChatStream, chat_req, options_set).unwrap();
+		assert_eq!(req.payload.x_get_as::<bool>("stream").unwrap(), true);
 	}
 }
 
@@ -470,9 +513,22 @@ impl OpenAIRespAdapter {
 			tools
 				.into_iter()
 				.map(|tool| {
-					// TODO: Need to handle the error correctly
-					// TODO: Needs to have a custom serializer (tool should not have to match to a provider)
-					// NOTE: Right now, low probability, so, we just return null if cannot convert to value.
+					// Built-in Responses tools (web_search, file_search, etc.) are identified by type.
+					// GenAI Tool currently models "name" + optional config, so we use a convention:
+					// - If schema/description are absent, treat `tool.name` as the built-in tool type.
+					if tool.schema.is_none() && tool.description.is_none() {
+						let mut v = json!({"type": tool.name});
+						if let Some(config) = tool.config {
+							if let (Some(dst), Value::Object(src)) = (v.as_object_mut(), config) {
+								for (k, val) in src {
+									dst.insert(k, val);
+								}
+							}
+						}
+						return v;
+					}
+
+					// Function tools.
 					json!({
 						"type": "function",
 						"name": tool.name,

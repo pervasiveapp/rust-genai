@@ -1,3 +1,4 @@
+use crate::adapter::adapters::bedrock_anthropic::BedrockAnthropicAdapter;
 use crate::adapter::adapters::together::TogetherAdapter;
 use crate::adapter::adapters::vertex_anthropic::VertexAnthropicAdapter;
 use crate::adapter::adapters::zai::ZaiAdapter;
@@ -54,6 +55,8 @@ pub enum AdapterKind {
 	Ollama,
 	/// Anthropic via Google Vertex AI (Publisher Model)
 	VertexAnthropic,
+	/// Anthropic via AWS Bedrock (bedrock-runtime InvokeModel)
+	BedrockAnthropic,
 }
 
 /// Serialization/Parse implementations
@@ -77,6 +80,7 @@ impl AdapterKind {
 			AdapterKind::Cohere => "Cohere",
 			AdapterKind::Ollama => "Ollama",
 			AdapterKind::VertexAnthropic => "VertexAnthropic",
+			AdapterKind::BedrockAnthropic => "BedrockAnthropic",
 		}
 	}
 
@@ -99,6 +103,7 @@ impl AdapterKind {
 			AdapterKind::Cohere => "cohere",
 			AdapterKind::Ollama => "ollama",
 			AdapterKind::VertexAnthropic => "vertex-anthropic",
+			AdapterKind::BedrockAnthropic => "bedrock-anthropic",
 		}
 	}
 
@@ -120,6 +125,7 @@ impl AdapterKind {
 			"cohere" => Some(AdapterKind::Cohere),
 			"ollama" => Some(AdapterKind::Ollama),
 			"vertex-anthropic" => Some(AdapterKind::VertexAnthropic),
+			"bedrock-anthropic" => Some(AdapterKind::BedrockAnthropic),
 			_ => None,
 		}
 	}
@@ -146,6 +152,7 @@ impl AdapterKind {
 			AdapterKind::Cohere => Some(CohereAdapter::API_KEY_DEFAULT_ENV_NAME),
 			AdapterKind::Ollama => None,
 			AdapterKind::VertexAnthropic => Some(VertexAnthropicAdapter::API_KEY_DEFAULT_ENV_NAME),
+			AdapterKind::BedrockAnthropic => Some(BedrockAnthropicAdapter::API_KEY_DEFAULT_ENV_NAME),
 		}
 	}
 }

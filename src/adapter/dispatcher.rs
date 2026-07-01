@@ -1,4 +1,5 @@
 use super::groq::GroqAdapter;
+use crate::adapter::adapters::bedrock_anthropic::BedrockAnthropicAdapter;
 use crate::adapter::adapters::mimo::MimoAdapter;
 use crate::adapter::adapters::together::TogetherAdapter;
 use crate::adapter::adapters::vertex_anthropic::VertexAnthropicAdapter;
@@ -49,6 +50,7 @@ impl AdapterDispatcher {
 			AdapterKind::Cohere => CohereAdapter::default_endpoint(),
 			AdapterKind::Ollama => OllamaAdapter::default_endpoint(),
 			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::default_endpoint(),
+			AdapterKind::BedrockAnthropic => BedrockAnthropicAdapter::default_endpoint(),
 		}
 	}
 
@@ -70,6 +72,7 @@ impl AdapterDispatcher {
 			AdapterKind::Cohere => CohereAdapter::default_auth(),
 			AdapterKind::Ollama => OllamaAdapter::default_auth(),
 			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::default_auth(),
+			AdapterKind::BedrockAnthropic => BedrockAnthropicAdapter::default_auth(),
 		}
 	}
 
@@ -91,6 +94,7 @@ impl AdapterDispatcher {
 			AdapterKind::Cohere => CohereAdapter::all_model_names(kind).await,
 			AdapterKind::Ollama => OllamaAdapter::all_model_names(kind).await,
 			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::all_model_names(kind).await,
+			AdapterKind::BedrockAnthropic => BedrockAnthropicAdapter::all_model_names(kind).await,
 		}
 	}
 
@@ -112,6 +116,7 @@ impl AdapterDispatcher {
 			AdapterKind::Cohere => CohereAdapter::get_service_url(model, service_type, endpoint),
 			AdapterKind::Ollama => OllamaAdapter::get_service_url(model, service_type, endpoint),
 			AdapterKind::VertexAnthropic => VertexAnthropicAdapter::get_service_url(model, service_type, endpoint),
+			AdapterKind::BedrockAnthropic => BedrockAnthropicAdapter::get_service_url(model, service_type, endpoint),
 		}
 	}
 
@@ -147,6 +152,9 @@ impl AdapterDispatcher {
 			AdapterKind::VertexAnthropic => {
 				VertexAnthropicAdapter::to_web_request_data(target, service_type, chat_req, options_set)
 			}
+			AdapterKind::BedrockAnthropic => {
+				BedrockAnthropicAdapter::to_web_request_data(target, service_type, chat_req, options_set)
+			}
 		}
 	}
 
@@ -173,6 +181,9 @@ impl AdapterDispatcher {
 			AdapterKind::Ollama => OllamaAdapter::to_chat_response(model_iden, web_response, options_set),
 			AdapterKind::VertexAnthropic => {
 				VertexAnthropicAdapter::to_chat_response(model_iden, web_response, options_set)
+			}
+			AdapterKind::BedrockAnthropic => {
+				BedrockAnthropicAdapter::to_chat_response(model_iden, web_response, options_set)
 			}
 		}
 	}
@@ -203,6 +214,9 @@ impl AdapterDispatcher {
 			AdapterKind::Ollama => OllamaAdapter::to_chat_stream(model_iden, reqwest_builder, options_set),
 			AdapterKind::VertexAnthropic => {
 				VertexAnthropicAdapter::to_chat_stream(model_iden, reqwest_builder, options_set)
+			}
+			AdapterKind::BedrockAnthropic => {
+				BedrockAnthropicAdapter::to_chat_stream(model_iden, reqwest_builder, options_set)
 			}
 		}
 	}
@@ -235,6 +249,9 @@ impl AdapterDispatcher {
 			AdapterKind::VertexAnthropic => {
 				VertexAnthropicAdapter::to_embed_request_data(target, embed_req, options_set)
 			}
+			AdapterKind::BedrockAnthropic => {
+				BedrockAnthropicAdapter::to_embed_request_data(target, embed_req, options_set)
+			}
 		}
 	}
 
@@ -264,6 +281,9 @@ impl AdapterDispatcher {
 			AdapterKind::Ollama => OllamaAdapter::to_embed_response(model_iden, web_response, options_set),
 			AdapterKind::VertexAnthropic => {
 				VertexAnthropicAdapter::to_embed_response(model_iden, web_response, options_set)
+			}
+			AdapterKind::BedrockAnthropic => {
+				BedrockAnthropicAdapter::to_embed_response(model_iden, web_response, options_set)
 			}
 		}
 	}

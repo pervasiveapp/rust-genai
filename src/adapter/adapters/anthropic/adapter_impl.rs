@@ -383,7 +383,7 @@ impl Adapter for AnthropicAdapter {
 // region:    --- Support
 
 impl AnthropicAdapter {
-	pub(super) fn into_usage(mut usage_value: Value) -> Usage {
+	pub(crate) fn into_usage(mut usage_value: Value) -> Usage {
 		// IMPORTANT: For Anthropic, the `input_tokens` does not include `cache_creation_input_tokens` or `cache_read_input_tokens`.
 		// Therefore, it must be normalized in the OpenAI style, where it includes both cached and written tokens (for symmetry).
 		let input_tokens: i32 = usage_value.x_take("input_tokens").ok().unwrap_or(0);
@@ -423,7 +423,10 @@ impl AnthropicAdapter {
 
 	/// Takes the GenAI ChatMessages and constructs the System string and JSON Messages for Anthropic.
 	/// - Will push the `ChatRequest.system` and system message to `AnthropicRequestParts.system`
-	fn into_anthropic_request_parts(chat_req: ChatRequest) -> Result<AnthropicRequestParts> {
+	///
+	/// Exposed at `pub(crate)` so the Bedrock adapter (which uses the identical Anthropic
+	/// messages schema, including native `cache_control` and TTL) can reuse it verbatim.
+	pub(crate) fn into_anthropic_request_parts(chat_req: ChatRequest) -> Result<AnthropicRequestParts> {
 		let mut messages: Vec<Value> = Vec::new();
 		// (content, cache_control)
 		let mut systems: Vec<(String, Option<CacheControl>)> = Vec::new();
@@ -698,10 +701,10 @@ fn apply_cache_control_to_parts(cache_control: Option<&CacheControl>, parts: Vec
 	parts
 }
 
-struct AnthropicRequestParts {
-	system: Option<Value>,
-	messages: Vec<Value>,
-	tools: Option<Vec<Value>>,
+pub(crate) struct AnthropicRequestParts {
+	pub(crate) system: Option<Value>,
+	pub(crate) messages: Vec<Value>,
+	pub(crate) tools: Option<Vec<Value>>,
 }
 
 // endregion: --- Support

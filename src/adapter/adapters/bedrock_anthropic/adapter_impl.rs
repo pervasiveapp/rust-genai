@@ -288,6 +288,10 @@ struct BedrockEventStreamer {
 	sent_start: bool,
 	pending: VecDeque<InterStreamEvent>,
 	in_progress_block: InProgressBlock,
+	// Set when the HTTP response status is not success (e.g. 403/404). The body is not
+	// eventstream-framed in that case — it is a plain JSON error — so we accumulate it as text
+	// and surface it verbatim instead of feeding it to the frame decoder.
+	error_status: Option<u16>,
 }
 
 impl BedrockEventStreamer {
@@ -303,6 +307,7 @@ impl BedrockEventStreamer {
 			sent_start: false,
 			pending: VecDeque::new(),
 			in_progress_block: InProgressBlock::Text,
+			error_status: None,
 		}
 	}
 
@@ -550,50 +555,55 @@ impl Stream for BedrockEventStreamer {
 		}
 
 		loop {
-			// Drain any complete frames already buffered.
-			match self.try_take_frame() {
-				Some(DecodedFrame::Corrupt) => {
-					self.done = true;
-					return Poll::Ready(Some(Err(crate::Error::WebStream {
-						model_iden: self.options.model_iden.clone(),
-						cause: "Bedrock eventstream: corrupt frame length".to_string(),
-					})));
-				}
-				Some(DecodedFrame::Message { headers, payload }) => {
-					// AWS marks modeled errors (throttling, modelStreamError, timeout, ...) with
-					// :message-type=exception|error and/or an :exception-type, and they carry no
-					// :event-type. Surface those as a stream error rather than parsing them as chunks.
-					let is_error = headers.exception_type.is_some()
-						|| matches!(headers.message_type.as_deref(), Some("exception") | Some("error"));
-					if is_error {
+			// On an HTTP error the body is plain JSON, not eventstream framing — skip frame
+			// decoding entirely and let the byte-stream arm accumulate the body, then surface it
+			// on close.
+			if self.error_status.is_none() {
+				// Drain any complete frames already buffered.
+				match self.try_take_frame() {
+					Some(DecodedFrame::Corrupt) => {
 						self.done = true;
-						let kind = headers
-							.exception_type
-							.as_deref()
-							.or(headers.message_type.as_deref())
-							.unwrap_or("exception");
-						let msg = String::from_utf8_lossy(&payload).into_owned();
 						return Poll::Ready(Some(Err(crate::Error::WebStream {
 							model_iden: self.options.model_iden.clone(),
-							cause: format!("Bedrock eventstream {kind}: {msg}"),
+							cause: "Bedrock eventstream: corrupt frame length".to_string(),
 						})));
 					}
+					Some(DecodedFrame::Message { headers, payload }) => {
+						// AWS marks modeled errors (throttling, modelStreamError, timeout, ...) with
+						// :message-type=exception|error and/or an :exception-type, and they carry no
+						// :event-type. Surface those as a stream error rather than parsing them as chunks.
+						let is_error = headers.exception_type.is_some()
+							|| matches!(headers.message_type.as_deref(), Some("exception") | Some("error"));
+						if is_error {
+							self.done = true;
+							let kind = headers
+								.exception_type
+								.as_deref()
+								.or(headers.message_type.as_deref())
+								.unwrap_or("exception");
+							let msg = String::from_utf8_lossy(&payload).into_owned();
+							return Poll::Ready(Some(Err(crate::Error::WebStream {
+								model_iden: self.options.model_iden.clone(),
+								cause: format!("Bedrock eventstream {kind}: {msg}"),
+							})));
+						}
 
-					// Normal output: :message-type=event, :event-type=chunk. Be lenient about the
-					// exact event-type (only errors are special-cased above).
-					if let Ok(outer) = serde_json::from_slice::<Value>(&payload)
-						&& let Some(inner_b64) = outer.get("bytes").and_then(|v| v.as_str())
-						&& let Ok(inner_bytes) = B64.decode(inner_b64)
-						&& let Ok(parsed) = serde_json::from_slice::<Value>(&inner_bytes)
-					{
-						self.handle_inner_event(parsed);
+						// Normal output: :message-type=event, :event-type=chunk. Be lenient about the
+						// exact event-type (only errors are special-cased above).
+						if let Ok(outer) = serde_json::from_slice::<Value>(&payload)
+							&& let Some(inner_b64) = outer.get("bytes").and_then(|v| v.as_str())
+							&& let Ok(inner_bytes) = B64.decode(inner_b64)
+							&& let Ok(parsed) = serde_json::from_slice::<Value>(&inner_bytes)
+						{
+							self.handle_inner_event(parsed);
+						}
+						if let Some(ev) = self.pending.pop_front() {
+							return Poll::Ready(Some(Ok(ev)));
+						}
+						continue;
 					}
-					if let Some(ev) = self.pending.pop_front() {
-						return Poll::Ready(Some(Ok(ev)));
-					}
-					continue;
+					None => {} // need more bytes
 				}
-				None => {} // need more bytes
 			}
 
 			// Establish the connection lazily on first poll.
@@ -607,6 +617,12 @@ impl Stream for BedrockEventStreamer {
 					Poll::Ready(Ok(response)) => {
 						let status = response.status();
 						debug!("Bedrock eventstream connected: status={}", status.as_u16());
+						// On a non-success status the body is a plain JSON error, not eventstream
+						// framing. Remember that so we surface the body verbatim instead of trying
+						// to decode frames out of it (which otherwise reads as "corrupt frame").
+						if !status.is_success() {
+							self.error_status = Some(status.as_u16());
+						}
 						let stream = response.bytes_stream();
 						self.bytes_stream = Some(Box::pin(stream));
 						self.response_future = None;
@@ -639,6 +655,14 @@ impl Stream for BedrockEventStreamer {
 					Poll::Ready(None) => {
 						// Stream ended.
 						self.done = true;
+						// Non-success HTTP: the accumulated body is a plain JSON error; surface it.
+						if let Some(code) = self.error_status {
+							let body = String::from_utf8_lossy(&self.buf).into_owned();
+							return Poll::Ready(Some(Err(crate::Error::WebStream {
+								model_iden: self.options.model_iden.clone(),
+								cause: format!("Bedrock HTTP {code}: {}", body.trim()),
+							})));
+						}
 						// Leftover bytes that never formed a complete frame mean the response was
 						// truncated mid-frame: report an error rather than a clean End.
 						if !self.buf.is_empty() {

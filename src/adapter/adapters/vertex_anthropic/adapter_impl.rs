@@ -20,6 +20,8 @@ pub struct VertexAnthropicAdapter;
 const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 
 const MODELS: &[&str] = &[
+	// Sonnet 5 (default revision alias on Vertex)
+	"claude-sonnet-5@default",
 	// GA 4.1 model ID with revision suffix on Vertex
 	"claude-opus-4-1@20250805",
 	// Commonly available 3.x variants
@@ -848,3 +850,88 @@ fn truncate_str_dbg(s: &str, max: usize) -> String {
 }
 
 // endregion
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::adapter::ServiceType;
+	use crate::chat::{CacheControl, ChatMessage, ChatOptionsSet, ChatRequest};
+	use crate::resolver::AuthData;
+
+	fn mk_target(model: &str, base_url: &str, token: &str) -> ServiceTarget {
+		let model = ModelIden::new(AdapterKind::VertexAnthropic, model);
+		let endpoint = Endpoint::from_owned(base_url.to_string());
+		let auth = AuthData::from_single(token);
+		ServiceTarget { endpoint, auth, model }
+	}
+
+	#[test]
+	fn test_vertex_anthropic_url_build() {
+		let base = "https://aiplatform.googleapis.com/v1/projects/p/locations/l/";
+		let target = mk_target("claude-opus-4-1@20250805", base, "tkn");
+		let url =
+			VertexAnthropicAdapter::get_service_url(&target.model, ServiceType::Chat, target.endpoint.clone()).unwrap();
+		assert_eq!(
+			url,
+			format!(
+				"{}publishers/anthropic/models/claude-opus-4-1@20250805:rawPredict",
+				base
+			)
+		);
+		let url_stream =
+			VertexAnthropicAdapter::get_service_url(&target.model, ServiceType::ChatStream, target.endpoint).unwrap();
+		assert_eq!(
+			url_stream,
+			format!(
+				"{}publishers/anthropic/models/claude-opus-4-1@20250805:streamRawPredict",
+				base
+			)
+		);
+	}
+
+	#[test]
+	fn test_vertex_anthropic_payload_basic() {
+		let base = "https://aiplatform.googleapis.com/v1/projects/p/locations/l/";
+		let target = mk_target("claude-opus-4-1@20250805", base, "tkn");
+
+		let chat_req = ChatRequest::new(vec![ChatMessage::system("sys"), ChatMessage::user("hi")]);
+		let req =
+			VertexAnthropicAdapter::to_web_request_data(target, ServiceType::Chat, chat_req, ChatOptionsSet::default())
+				.expect("build ok");
+
+		let auth_header = req.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+		assert!(auth_header.unwrap().1.starts_with("Bearer "));
+
+		// Vertex carries the model in the URL, not the body, and uses the vertex version string.
+		assert!(req.payload.get("model").is_none());
+		let version = req.payload.get("anthropic_version").and_then(|v| v.as_str()).unwrap_or("");
+		assert_eq!(version, ANTHROPIC_VERSION);
+		assert!(req.payload.get("messages").is_some());
+	}
+
+	#[test]
+	fn test_vertex_anthropic_cache_control_strips_ttl() {
+		let base = "https://aiplatform.googleapis.com/v1/projects/p/locations/l/";
+		let target = mk_target("claude-opus-4-1@20250805", base, "tkn");
+
+		let msg = ChatMessage::user("cache me").with_options(CacheControl::EphemeralWithTtl("5m".to_string()));
+		let chat_req = ChatRequest::new(vec![msg]);
+		let req =
+			VertexAnthropicAdapter::to_web_request_data(target, ServiceType::Chat, chat_req, ChatOptionsSet::default())
+				.expect("build ok");
+
+		let messages = req.payload.get("messages").and_then(|v| v.as_array()).expect("messages array");
+		let content = messages
+			.first()
+			.and_then(|m| m.get("content"))
+			.and_then(|v| v.as_array())
+			.expect("content array");
+		let cc = content
+			.last()
+			.and_then(|p| p.get("cache_control"))
+			.expect("cache_control present");
+		// Vertex accepts cache_control but not the ttl field: it must be {"type":"ephemeral"} only.
+		assert_eq!(cc.get("type").and_then(|v| v.as_str()), Some("ephemeral"));
+		assert!(cc.get("ttl").is_none(), "Vertex must strip ttl from cache_control");
+	}
+}
